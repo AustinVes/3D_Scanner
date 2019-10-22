@@ -116,7 +116,7 @@ void handle_doscan() {start_scan(atoi(rx_args_buffer[0]), atoi(rx_args_buffer[1]
 
 bool busy = false; // while true, the device will reject incoming requests. We use this when the device is in the process of a scan
 
-// ^ global variables
+// ^ global variables (settings)
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // v functions
 
