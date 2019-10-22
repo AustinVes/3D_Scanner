@@ -11,6 +11,7 @@ uint16_t scan_tilt_step; // the tilting step size "
 bool reverse_pan = false; // whether the scanner should currently be panning backwards (scan_pan_end to scan_pan_start)
 
 // variables used for timing, namely to implement non-blocking delays
+const uint8_t ms_per_us = 30; // the number of milliseconds to delay per change in Servo.writeMicroseconds() value
 uint16_t stored_time = 0; // the start of the delay period
 uint16_t delay_time = 0; // the length of the delay
 
@@ -37,7 +38,7 @@ void loop() {
         } else if (reverse_pan && (pan_servo.readMicroseconds() <= pan_home + scan_pan_start)) { // if the scanner is panning right and has hit the end of the current scan row
           reverse_pan = false; // "
           goto_rel_pos(0,scan_tilt_step); // "
-          delay_time = scan_tilt_step * 2; // "
+          delay_time = scan_tilt_step * ms_per_us; // "
           stored_time = millis(); // "
         } else { // if the scanner has not yet made it to the end of the current row
           // take a sensor reading and stream it to the computer, along with the current position relative to home
@@ -47,7 +48,7 @@ void loop() {
           send_message(scan_reading_header, temp_body_buffer);
           
           goto_rel_pos(scan_pan_step * ((!reverse_pan*2)-1), 0); // pan the scanner to the next position in the row
-          delay_time = scan_pan_step * 2; // set a delay to give the pan servo time to move to the next position in the row
+          delay_time = scan_pan_step * ms_per_us; // set a delay to give the pan servo time to move to the next position in the row
           stored_time = millis(); // start the delay timer
         }
       } else { // if the scanner HAS reached the end of the scan
