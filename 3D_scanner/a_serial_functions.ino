@@ -41,7 +41,7 @@ const uint8_t max_rx_cmd_len = 8; // the maximum allowed length (in chars) of an
 const uint8_t max_rx_args_num = 4; // the maximum allowed number of arguments in any incoming packet
 const uint8_t max_rx_args_len = 5; // the maximum allowed length (in chars) of any incoming argument
 const uint8_t max_tx_header_len = 14; // the maximum allowed length (in chars) of the header of any outgoing packet
-const uint8_t max_tx_body_len = 30; // the maximum allowed length (in chars) of the body of any outgoing packet
+const uint8_t max_tx_body_len = 47; // the maximum allowed length (in chars) of the body of any outgoing packet (should be at least 47 to avoid endless error loops)
 
 // this is where all the buffers get declared... no touchy
 char rx_byte; // a buffer for storing the incoming byte from Serial
@@ -83,17 +83,17 @@ struct Cmd_Binding {
 // we recommend using an intermediate handler function that calls the actual function after
 // extracting arguments from rx_args_buffer 
 const struct Cmd_Binding rx_cmd_bindings[] = {
-  {"PING"    , handle_ping},
-  {"GOTO"    , handle_goto},
-  {"GOTOABS" , handle_gotoabs},
-  {"MOVE"    , handle_gotorel},
-  {"GOHOME"  , handle_gohome},
-  {"SETHOME" , handle_sethome},
-  {"CLRHOME" , handle_clearhome},
-  {"RAW"     , handle_raw},
-  {"SMOOTH"  , handle_smooth},
-  {"READ"    , handle_read},
-  {"DOSCAN"  , handle_doscan}
+  {"PING"    , handle_ping},      // @PING; checks whether the device is still responsive (just triggers an ack packet)
+  {"GOTO"    , handle_goto},      // @GOTO{pan,tilt}; moves the scanner to a position relative to home
+  {"GOTOABS" , handle_gotoabs},   // @GOTOABS{pan,tilt}; moves the scanner to a position based on the raw position of the motors, ignoring home
+  {"MOVE"    , handle_gotorel},   // @MOVE{pan,tilt}; moves the scanner by the specified amount
+  {"GOHOME"  , handle_gohome},    // @GOHOME; moves the scanner to home
+  {"SETHOME" , handle_sethome},   // @SETHOME; sets the current position as home and stores it in EEPROM
+  {"CLRHOME" , handle_clearhome}, // @CLRHOME; resets home back to the hardcoded default and clears the previous home position from EEPROM
+  {"RAW"     , handle_raw},       // @RAW; sets the scanner to return "raw" sensor readings with each call to read_sensor()
+  {"SMOOTH"  , handle_smooth},    // @SMOOTH; sets the scanner to return "smooth" sensor readings with each call to read_sensor()
+  {"READ"    , handle_read},      // @READ; performs a single sensor reading and returns the value over serial as @{reading};
+  {"DOSCAN"  , handle_doscan}     // @DOSCAN{pan_width,tilt_width,pan_step,tilt_step}; tnitiates a scan, centered at home, where individual readings are streamed back as @{pan,tilt,reading};
 };
 
 // and this is where you define those functions
@@ -114,12 +114,13 @@ void handle_read() {
 }
 void handle_doscan() {start_scan(atoi(rx_args_buffer[0]), atoi(rx_args_buffer[1]), atoi(rx_args_buffer[2]), atoi(rx_args_buffer[3]));}
 
-bool busy = false;
+bool busy = false; // while true, the device will reject incoming requests. We use this when the device is in the process of a scan
 
 // ^ global variables
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // v functions
 
+// call this function ONCE
 void configure_serial(uint16_t baudrate) {
   rx_cmd_buffer_len = (sizeof(rx_cmd_buffer) / sizeof(rx_cmd_buffer[0])) - 1;
   rx_args_buffer_arglen = sizeof(rx_args_buffer) / sizeof(rx_args_buffer[0]);
@@ -135,91 +136,87 @@ void configure_serial(uint16_t baudrate) {
   Serial.begin(baudrate);
 }
 
+// call this function with each main loop of the program
 void update_rx() {
+  // listen for incoming characters over Serial
   while (Serial.available()) {
     rx_byte = Serial.read();
 
-    switch (receiving_packet) {
-      case true:
-        switch (receiving_args) {
-          case true:
-            // listen for args_separator and args_terminator, put everything else in rx_args_buffer
-            switch (rx_byte) {
-              case args_separator:
-                rx_args_buffer_argpos++;
-                if (rx_args_buffer_argpos >= rx_args_buffer_arglen) {
-                  static char temp_body_buffer[max_tx_body_len + 1];
-                  memset(temp_body_buffer, NULL, sizeof(temp_body_buffer));
-                  snprintf_P(temp_body_buffer, max_tx_body_len, PSTR("RX_ARGS_BUFFER OVERFLOW. Buffer len: %d, Write pos: %d"), rx_args_buffer_arglen, rx_args_buffer_argpos);
-                  send_message(error_header, temp_body_buffer);
-                  reset_rx_buffers();
-                }
-                break;
-              case args_terminator:
-                receiving_args = false;
-                break;
-              default:
-                if ((!isDigit(rx_byte)) && rx_byte != '-') {
-                  static char temp_body_buffer[max_tx_body_len + 1];
-                  memset(temp_body_buffer, NULL, sizeof(temp_body_buffer));
-                  snprintf_P(temp_body_buffer, max_tx_body_len, PSTR("Invalid char in args: %c"), rx_byte);
-                  send_message(error_header, temp_body_buffer);
-                  reset_rx_buffers();
-                }
-                for (int d=0; d < rx_args_buffer_diglen - 1; d++) {
-                  rx_args_buffer[rx_args_buffer_argpos][d] = rx_args_buffer[rx_args_buffer_argpos][d+1];
-                }
-                rx_args_buffer[rx_args_buffer_argpos][rx_args_buffer_diglen - 1] = rx_byte;
-                break;
-            }
-            break;
-          default:
-            // listen for args_initiator and packet_terminator, put everything else in rx_cmd_buffer
-            switch (rx_byte) {
-              case args_initiator:
-                // set receiving_args flag
-                receiving_args = true;
-                break;
-              case packet_terminator:
-                // clear receiving_packet and receiving_args flags, kick off response to instruction
-                receiving_packet = false;
-                receiving_args = false;
-                handle_rx_packet();
-                break;
-              default:
-                // write the received char to the rx_cmd_buffer 
-                if (!isUpperCase(rx_byte)) {
-                  static char temp_body_buffer[max_tx_body_len + 1];
-                  memset(temp_body_buffer, NULL, sizeof(temp_body_buffer));
-                  snprintf_P(temp_body_buffer, max_tx_body_len, PSTR("Invalid char in cmd: %c"), rx_byte);
-                  send_message(error_header, temp_body_buffer);
-                  reset_rx_buffers();
-                }
-                if (rx_cmd_buffer_pos < rx_cmd_buffer_len) {
-                  rx_cmd_buffer[rx_cmd_buffer_pos] = rx_byte;
-                  rx_cmd_buffer_pos++;
-                } else {
-                  static char temp_body_buffer[max_tx_body_len + 1];
-                  memset(temp_body_buffer, NULL, sizeof(temp_body_buffer));
-                  snprintf_P(temp_body_buffer, max_tx_body_len, PSTR("RX_CMD_BUFFER OVERFLOW. Buffer len: %d, Write pos: %d"), rx_cmd_buffer_len, rx_cmd_buffer_pos);
-                  send_message(error_header, temp_body_buffer);
-                  reset_rx_buffers();
-                }
+    if (receiving_packet) {
+      switch (receiving_args) {
+        case true: // listen for args_separator and args_terminator, put everything else in rx_args_buffer
+          switch (rx_byte) {
+            case args_separator:
+              rx_args_buffer_argpos++; // move onto the next argument buffer
+              if (rx_args_buffer_argpos >= rx_args_buffer_arglen) { // throw an error if the program tries to fill more than the allowed number of argument buffers
+                static char temp_body_buffer[max_tx_body_len + 1];
+                memset(temp_body_buffer, NULL, sizeof(temp_body_buffer));
+                snprintf_P(temp_body_buffer, max_tx_body_len, PSTR("RX_ARGS_BUFFER OVERFLOW. Buffer len: %d, Write pos: %d"), rx_args_buffer_arglen, rx_args_buffer_argpos);
+                send_message(error_header, temp_body_buffer);
+                reset_rx_buffers();
                 break;
               }
               break;
-        }
-        break;
+            case args_terminator:
+              receiving_args = false;
+              break;
+            default:
+              if ((!isDigit(rx_byte)) && rx_byte != '-') { // throw an error if incoming "argument" is anything other than a whole number
+                static char temp_body_buffer[max_tx_body_len + 1];
+                memset(temp_body_buffer, NULL, sizeof(temp_body_buffer));
+                snprintf_P(temp_body_buffer, max_tx_body_len, PSTR("Invalid char in args: %c"), rx_byte);
+                send_message(error_header, temp_body_buffer);
+                reset_rx_buffers();
+                break;
+              }
+              for (int d=0; d < rx_args_buffer_diglen - 1; d++) { // push each char in the current argument buffer one position closer to the front
+                rx_args_buffer[rx_args_buffer_argpos][d] = rx_args_buffer[rx_args_buffer_argpos][d+1];
+              }
+              rx_args_buffer[rx_args_buffer_argpos][rx_args_buffer_diglen - 1] = rx_byte; // place the new char at the end of the current argument buffer
+              break;
+          }
+          break;
+        default: // listen for args_initiator and packet_terminator, put everything else in rx_cmd_buffer
+          switch (rx_byte) {
+            case args_initiator: // set receiving_args flag
+              receiving_args = true;
+              break;
+            case packet_terminator: // clear receiving_packet and receiving_args flags, kick off response to instruction
+              receiving_packet = false;
+              receiving_args = false;
+              handle_rx_packet();
+              break;
+            default: // write the received char to the rx_cmd_buffer
+              if (!isUpperCase(rx_byte)) { // throw an error if the cmd portion of the incoming packet contains anything other than uppercase letters
+                static char temp_body_buffer[max_tx_body_len + 1];
+                memset(temp_body_buffer, NULL, sizeof(temp_body_buffer));
+                snprintf_P(temp_body_buffer, max_tx_body_len, PSTR("Invalid char in cmd: %c"), rx_byte);
+                send_message(error_header, temp_body_buffer);
+                reset_rx_buffers();
+                break;
+              }
+              if (rx_cmd_buffer_pos < rx_cmd_buffer_len) {
+                rx_cmd_buffer[rx_cmd_buffer_pos] = rx_byte;
+                rx_cmd_buffer_pos++;
+              } else { // throw an error if the cmd portion of the incoming packet is longer than allowed
+                static char temp_body_buffer[max_tx_body_len + 1];
+                memset(temp_body_buffer, NULL, sizeof(temp_body_buffer));
+                snprintf_P(temp_body_buffer, max_tx_body_len, PSTR("RX_CMD_BUFFER OVERFLOW. Buffer len: %d, Write pos: %d"), rx_cmd_buffer_len, rx_cmd_buffer_pos);
+                send_message(error_header, temp_body_buffer);
+                reset_rx_buffers();
+                break;
+              }
+              break;
+            }
+            break;
+      }
     }
-    // listen for packet initiator
-    switch (rx_byte) {
-      case packet_initiator:
-        reset_rx_buffers();
-        receiving_packet = true;
-        receiving_args = false;
-        break;
+    
+    if (rx_byte == packet_initiator) {
+      reset_rx_buffers();
+      receiving_packet = true;
+      receiving_args = false;
     }
-  
   }
 }
 
@@ -241,17 +238,19 @@ void reset_rx_buffers() {
 }
 
 void handle_rx_packet() {
-  for (int c=0; c <= num_rx_cmds; c++) {
-    if (c == num_rx_cmds) {
+  for (int c=0; c <= num_rx_cmds; c++) { // loop through all the commands the Arduino should be listening for
+    if (c == num_rx_cmds) { // if it hits the end of the list and nothing's matched yet, throw an error
       static char temp_body_buffer[max_tx_body_len + 1];
       memset(temp_body_buffer, NULL, sizeof(temp_body_buffer));
       snprintf_P(temp_body_buffer, max_tx_body_len, PSTR("Unrecognized command: %s"), rx_cmd_buffer);
       send_message(error_header, temp_body_buffer);
-    } else if (strcmp(rx_cmd_buffer, rx_cmd_bindings[c].cmd_cstr) == 0) {      
-      if (!busy) {
+    } else if (strcmp(rx_cmd_buffer, rx_cmd_bindings[c].cmd_cstr) == 0) { // if the cmd in the just-recieved packet matches a command the device is listening for     
+      if (!busy) { // if the device is accepting new commands
+        // send the computer back an acknowledgement packet that includes the name of the command it is now processing
         send_message(ack_header, rx_cmd_buffer);
+        // call the function that is bound to the command
         rx_cmd_bindings[c].handler_func();
-      } else {
+      } else { // throw an error if the device is currently busy and is not accepting new commands
         static char temp_body_buffer[max_tx_body_len + 1];
         memset(temp_body_buffer, NULL, sizeof(temp_body_buffer));
         snprintf_P(temp_body_buffer, max_tx_body_len, PSTR("Scanner is busy."));
@@ -266,6 +265,7 @@ void handle_rx_packet() {
 void send_message(const char *header_text, const char *body_text) {
   reset_tx_buffers();
 
+  // throw an error if the passed message header is too long
   if (strlen(header_text) > max_tx_header_len) {
     static char temp_body_buffer[max_tx_body_len + 1];
     memset(temp_body_buffer, NULL, sizeof(temp_body_buffer));
@@ -273,7 +273,8 @@ void send_message(const char *header_text, const char *body_text) {
     send_message(error_header, temp_body_buffer);
     return;
   }
-  
+
+  // throw an error if the passed message body is too long
   if (strlen(body_text) > max_tx_body_len) {
     static char temp_body_buffer[max_tx_body_len + 1];
     memset(temp_body_buffer, NULL, sizeof(temp_body_buffer));

@@ -37,7 +37,7 @@ void loop() {
         } else {
           static char temp_body_buffer[max_tx_body_len + 1];
           memset(temp_body_buffer, NULL, sizeof(temp_body_buffer));
-          snprintf_P(temp_body_buffer, max_tx_body_len, PSTR("%d,%d,%d"), pan_servo.readMicroseconds(), tilt_servo.readMicroseconds(), read_sensor());
+          snprintf_P(temp_body_buffer, max_tx_body_len, PSTR("%d,%d,%d"), pan_servo.readMicroseconds() - pan_home, tilt_servo.readMicroseconds() - tilt_home, read_sensor());
           send_message(scan_reading_header, temp_body_buffer);
 
           goto_rel_pos(scan_pan_step * ((!reverse_pan*2)-1), 0);

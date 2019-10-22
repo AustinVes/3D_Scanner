@@ -20,15 +20,17 @@
  *     - [15:8] ADCH: the high byte of the result of the latest conversion
 */
 
-bool sensor_smoothing = false;
-const uint8_t reads_per_smooth = 5;
-uint16_t adc_reads_buffer[reads_per_smooth];
-uint8_t curr_num_reads = 0;
-uint16_t smooth_avg_buffer;
-uint8_t low_read_index;
-uint8_t high_read_index;
-uint16_t diff_from_avg;
+// variables used to calculate smoothed sensor readings
+bool sensor_smoothing = false; // whether or not smoothing is enabled
+const uint8_t reads_per_smooth = 5; // the number (batch size) of raw sensor readings to take per smooth reading
+uint16_t adc_reads_buffer[reads_per_smooth]; // a buffer to store the batch of raw sensor readings
+uint8_t curr_num_reads = 0; // the number of raw sensor readings already taken in the current batch
+uint16_t smooth_avg_buffer; // a buffer to store averages of subsets of raw readings and then the final smoothed reading
+uint8_t low_read_index; // the index of the lowest reading in a subset of a batch
+uint8_t high_read_index; // the index of the highest reading in a subset of a batch
+uint16_t diff_from_avg; // the difference between one raw reading and the average of all the other raw readings in a given batch
 
+// call this function ONCE
 void configure_sensor() {
   memset(adc_reads_buffer, 0, sizeof(adc_reads_buffer));
   curr_num_reads = 0;
@@ -73,7 +75,8 @@ uint16_t read_sensor() {
     curr_num_reads = 0;
     smooth_avg_buffer = 0;
     diff_from_avg = 0;
-    
+
+    // take the specified number of raw sensor readings, store them in the buffer
     while (curr_num_reads < reads_per_smooth) {
       trigger_adc();
       adc_reads_buffer[curr_num_reads] = ADCW;
